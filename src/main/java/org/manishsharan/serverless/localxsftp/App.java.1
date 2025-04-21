@@ -1,0 +1,223 @@
+package org.manishsharan.serverless.cloudsftp;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import net.schmizz.sshj.SSHClient;
+import net.schmizz.sshj.sftp.SFTPClient;
+import net.schmizz.sshj.sftp.SFTPException;
+import net.schmizz.sshj.sftp.Response; // Needed for status code enum
+import net.schmizz.sshj.transport.verification.PromiscuousVerifier; // For simplicity, replace in production
+import net.schmizz.sshj.userauth.keyprovider.KeyProvider;
+
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
+import java.nio.file.NoSuchFileException;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+
+/**
+ * SFTP client application using SSHJ to upload a file based on JSON configuration
+ * provided via command-line argument. Destination folder is read from config.
+ */
+public class App {
+
+    // Initialize Log4j 2 logger
+    private static final Logger logger = LogManager.getLogger(App.class);
+
+    public static void main(String[] args) {
+        logger.info("SFTP Upload Client Started.");
+
+        // --- Read Configuration File Path from Command Line Arguments ---
+        if (args.length == 0) {
+            logger.error("Configuration file path must be provided as a command-line argument.");
+            System.err.println("Usage: java -jar <your-jar-file>.jar /path/to/config.json");
+            return;
+        }
+        String configFilePath = args[0];
+        logger.info("Attempting to load configuration from: {}", configFilePath);
+
+        SftpConfig config = loadConfig(configFilePath);
+        if (config == null) {
+            logger.error("Failed to load configuration from file: {}. Exiting.", configFilePath);
+            return;
+        }
+        logger.info("Configuration loaded successfully: {}", config); // Be careful logging sensitive paths
+
+        // Validate local file existence
+        Path localPath = Paths.get(config.getUploadFile());
+        if (!Files.exists(localPath) || !Files.isRegularFile(localPath)) {
+             logger.error("Local file to upload does not exist or is not a regular file: {}", localPath);
+             return;
+        }
+
+        // Initialize SSH Client
+        // Using try-with-resources ensures the client is closed automatically
+        try (SSHClient sshClient = new SSHClient()) {
+            // --- Host Key Verification ---
+            // WARNING: PromiscuousVerifier accepts *any* host key.
+            // Replace with sshClient.loadKnownHosts() in production for security.
+            sshClient.addHostKeyVerifier(new PromiscuousVerifier());
+            logger.warn("Using PromiscuousHostKeyVerifier. Replace with known_hosts verification in production!");
+
+            // --- Connect ---
+            logger.info("Connecting to SFTP server: {}:{}", config.getSftpServer(), config.getSftpPort());
+            sshClient.connect(config.getSftpServer(), config.getSftpPort());
+            logger.info("Connected successfully.");
+
+            // --- Authenticate ---
+            logger.info("Authenticating user '{}' with key file: {}", config.getSshUser(), config.getSshKey());
+            // Assumes the key file is not protected by a passphrase.
+            // If it is, you need to create a KeyProvider with a PasswordFinder.
+            // Example: KeyProvider keys = sshClient.loadKeys(config.getSshKey(), "your_passphrase");
+            KeyProvider keys = sshClient.loadKeys(config.getSshKey()); // Load key without passphrase
+            sshClient.authPublickey(config.getSshUser(), keys);
+            logger.info("Authentication successful.");
+
+            // --- Perform SFTP Upload ---
+            // Using try-with-resources ensures the SFTP client is closed
+            try (SFTPClient sftpClient = sshClient.newSFTPClient()) {
+
+                // --- Prepare Destination Path ---
+                String destFolder = config.getDestFolder();
+                String normalizedDestFolder = normalizeSftpPath(destFolder); // Normalize path
+                logger.info("Normalized destination folder: {}", normalizedDestFolder);
+
+                // --- Ensure Destination Directory Exists ---
+                ensureRemoteDirectoryExists(sftpClient, normalizedDestFolder);
+
+                // Determine final remote path for the file
+                String localFilename = localPath.getFileName().toString();
+                // Combine folder and filename, ensuring only one separator if folder is root "/"
+                String remotePath = normalizedDestFolder.equals("/") ?
+                                     "/" + localFilename :
+                                     normalizedDestFolder + "/" + localFilename;
+
+                logger.info("Uploading file '{}' to remote path '{}'", localPath, remotePath);
+                sftpClient.put(config.getUploadFile(), remotePath); // Use the full local path string here
+                logger.info("File uploaded successfully!");
+
+            } catch (IOException e) {
+                logger.error("SFTP operation failed: {}", e.getMessage(), e);
+            }
+
+        } catch (IOException e) {
+            logger.error("SSH connection or authentication failed: {}", e.getMessage(), e);
+        } finally {
+            logger.info("SFTP Upload Client Finished.");
+        }
+    }
+
+    /**
+     * Normalizes an SFTP path string.
+     * Ensures it starts with '/', removes trailing '/', and defaults to "/" if null/empty.
+     * Replaces backslashes with forward slashes.
+     * @param path The raw path string.
+     * @return A normalized SFTP path string.
+     */
+    private static String normalizeSftpPath(String path) {
+        if (path == null || path.trim().isEmpty()) {
+            return "/"; // Default to root if not specified
+        }
+        String normalized = path.trim().replace('\\', '/'); // Use forward slashes
+        // Remove trailing slash ONLY if the path is not just "/"
+        if (normalized.length() > 1 && normalized.endsWith("/")) {
+            normalized = normalized.substring(0, normalized.length() - 1);
+        }
+        // Prepend leading slash if missing
+        if (!normalized.startsWith("/")) {
+            normalized = "/" + normalized;
+        }
+        // Handle case where input was just "/" which becomes empty after removing trailing slash
+        if (normalized.isEmpty() && path.trim().equals("/")) {
+             return "/";
+        }
+        // Handle case where input was empty or just whitespace, ensure it returns "/"
+        if (normalized.isEmpty()){
+            return "/";
+        }
+        return normalized;
+    }
+
+     /**
+     * Checks if a remote directory exists and creates it if it doesn't.
+     * @param sftpClient The active SFTPClient.
+     * @param remoteDirPath The normalized path of the directory to check/create.
+     * @throws IOException If checking or creating the directory fails for reasons other than it not existing initially.
+     */
+    private static void ensureRemoteDirectoryExists(SFTPClient sftpClient, String remoteDirPath) throws IOException {
+        if (remoteDirPath.equals("/")) {
+             logger.debug("Destination is root directory, skipping directory check/creation.");
+             return; // Cannot create root
+        }
+        try {
+            // Attempt to get file attributes. If it succeeds, the directory exists.
+            sftpClient.stat(remoteDirPath);
+            logger.debug("Remote directory '{}' already exists.", remoteDirPath);
+        } catch (SFTPException e) {
+            // --- CORRECTED LINE (Using getCode()) ---
+            // Check if the exception's status code matches the code for NO_SUCH_FILE enum
+            // Note: e.getStatusCode() returns long, getCode() returns int - comparison is valid.
+            if (e.getStatusCode() == Response.StatusCode.NO_SUCH_FILE) {
+                logger.info("Remote directory '{}' does not exist. Attempting to create.", remoteDirPath);
+                try {
+                    // Attempt to create the directory, including any necessary parent directories.
+                    sftpClient.mkdirs(remoteDirPath);
+                    logger.info("Successfully created remote directory '{}'.", remoteDirPath);
+                } catch (IOException createEx) {
+                    logger.error("Failed to create remote directory '{}': {}", remoteDirPath, createEx.getMessage(), createEx);
+                    // Re-throw the exception that occurred during creation.
+                    throw createEx;
+                }
+            } else {
+                // A different SFTP error occurred during stat (e.g., permission denied to access parent)
+                logger.error("Failed to check status of remote directory '{}': {}", remoteDirPath, e.getMessage(), e);
+                // Re-throw the original SFTPException from stat.
+                throw e;
+            }
+        }
+    }
+
+
+    /**
+     * Loads configuration from the specified JSON file path.
+     * @param configFilePath The path to the configuration JSON file.
+     * @return SftpConfig object or null if loading fails.
+     */
+    private static SftpConfig loadConfig(String configFilePath) {
+        ObjectMapper mapper = new ObjectMapper();
+        Path path;
+        try {
+             path = Paths.get(configFilePath);
+             // Check if the file exists and is readable
+             if (!Files.exists(path) || !Files.isReadable(path)) {
+                 logger.error("Configuration file does not exist or is not readable at path: {}", configFilePath);
+                 return null;
+             }
+        } catch (InvalidPathException e) {
+            logger.error("Invalid configuration file path provided: {}", configFilePath, e);
+            return null;
+        }
+
+
+        try (InputStream is = Files.newInputStream(path)) {
+            // Attempt to parse the JSON file into the SftpConfig object
+            return mapper.readValue(is, SftpConfig.class);
+        } catch (NoSuchFileException e) {
+             // This case should ideally be caught by the Files.exists check above, but included for robustness
+             logger.error("Configuration file not found at path: {}", configFilePath, e);
+             return null;
+        } catch (IOException e) {
+            // Catch errors during file reading or JSON parsing
+            logger.error("Failed to read or parse configuration file '{}': {}", configFilePath, e.getMessage(), e);
+            return null;
+        } catch (Exception e) { // Catch broader unexpected exceptions during parsing
+             logger.error("An unexpected error occurred while parsing configuration file '{}': {}", configFilePath, e.getMessage(), e);
+             return null;
+        }
+    }
+}

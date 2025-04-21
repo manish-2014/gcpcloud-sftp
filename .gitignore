@@ -1,0 +1,23 @@
+# Compiled class file
+*.class
+
+# Log file
+*.log
+
+# Package Files #
+*.jar
+*.war
+*.ear
+
+# Maven target directory
+/target/
+/jobfile/
+# Intellij Idea
+.idea/
+*.ipr
+*.iws
+*.iml
+
+# Eclipse
+.settings/
+.project
