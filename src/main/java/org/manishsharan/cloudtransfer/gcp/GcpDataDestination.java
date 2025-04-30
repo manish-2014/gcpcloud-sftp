@@ -1,17 +1,22 @@
 package org.manishsharan.cloudtransfer.gcp;
 
-import com.google.auth.oauth2.GoogleCredentials;
-import com.google.auth.oauth2.ServiceAccountCredentials;
+// Removed unused auth imports
+// import com.google.auth.oauth2.GoogleCredentials;
+// import com.google.auth.oauth2.ServiceAccountCredentials;
 import com.google.cloud.WriteChannel;
 import com.google.cloud.storage.*;
 
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import org.manishsharan.cloudtransfer.config.GcpConfig;
 import org.manishsharan.cloudtransfer.core.DataDestination;
 import org.manishsharan.cloudtransfer.core.ItemInfo;
+// Import the provider interface
+import org.manishsharan.cloudtransfer.providers.GcpStorageProvider;
 
-import java.io.FileInputStream;
+// Removed unused io/nio imports
+// import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.channels.Channels;
@@ -20,130 +25,143 @@ import java.util.Objects;
 /**
  * DataDestination implementation for writing to Google Cloud Storage.
  * Supports both prefix (folder) and single object modes based on source configuration.
- * Destination config itself doesn't dictate mode, only bucket and optional base prefix (folder).
+ * Uses GcpStorageProvider for client creation.
  */
 public class GcpDataDestination implements DataDestination {
 
-    private static final Logger logger = LogManager.getLogger(GcpDataDestination.class);
+    private static final Logger logger = LoggerFactory.getLogger(GcpDataDestination.class);
+
+    // *** Enhancement: Define static final chunk size ***
+    // GCS requires chunk size to be a multiple of 256 KiB (262,144 bytes)
+    // Examples: 8 MiB = 8 * 1024 * 1024 = 8,388,608 bytes
+    //          16 MiB = 16 * 1024 * 1024 = 16,777,216 bytes
+    // Choose a size appropriate for your environment (larger chunks can be faster but use more memory)
+    private static final int RESUMABLE_UPLOAD_CHUNK_SIZE_BYTES = 16 * 1024 * 1024; // 16 MiB example
 
     private final GcpConfig config; // Destination config (bucket, optional folder)
-    private final Storage storage;
+    private final GcpStorageProvider storageProvider; // Added provider field
+    private final Storage storage; // Store client obtained from provider
     private final String bucketName;
     private final String folderPrefix; // Normalized prefix from destination config
 
-    public GcpDataDestination(GcpConfig config) throws IOException {
+    // Constructor now accepts GcpStorageProvider
+    public GcpDataDestination(GcpConfig config, GcpStorageProvider storageProvider) throws IOException {
         this.config = Objects.requireNonNull(config, "GcpConfig cannot be null");
-        // Destination config *can* have fileName, but we ignore it here.
-        // Destination logic depends on whether the *source* was single file.
-        // The base path for writing is always bucket + optional folder prefix.
+        this.storageProvider = Objects.requireNonNull(storageProvider, "GcpStorageProvider cannot be null");
         this.bucketName = config.getBucket();
-        this.folderPrefix = config.getNormalizedFolderPrefix(); // Use helper
+        this.folderPrefix = config.getNormalizedFolderPrefix();
         logger.info("Initializing GCP Data Destination for: {}", config.getDescription());
 
+        Storage tempStorage = null; // Temporary reference
         try {
-            GoogleCredentials credentials = ServiceAccountCredentials.fromStream(
-                    new FileInputStream(config.getServiceAccountKeyPath()));
-
-            StorageOptions storageOptions = StorageOptions.newBuilder()
-                    .setCredentials(credentials)
-                    .build();
-
-            this.storage = storageOptions.getService();
-            logger.info("GCP Storage client initialized successfully for destination.");
+            // --- Get authenticated client from provider ---
+            logger.debug("Requesting Storage client from GcpStorageProvider...");
+            tempStorage = this.storageProvider.getStorageClient(config); // Delegate client creation/auth
+            if (tempStorage == null) {
+                throw new IOException("GcpStorageProvider returned a null Storage client.");
+            }
+            this.storage = tempStorage; // Assign to final field
+            logger.info("GCP Storage client obtained from provider.");
+            // --- End client acquisition ---
 
             // Validate destination bucket write access? Optional.
-            // Could do a test write or rely on first actual write attempt.
-            // storage.get(bucketName); // At least check bucket exists
+            validateDestinationBucket();
 
         } catch (IOException e) {
-            logger.error("Failed to initialize GCP Storage client for destination: {}", e.getMessage(), e);
+            logger.error("Failed to initialize GCP destination: {}", e.getMessage(), e);
+            close(); // Call close for potential cleanup if needed by provider/client
+            throw e;
+        } catch (Exception e) {
+            logger.error("Unexpected error during GCP destination initialization via provider: {}", e.getMessage(), e);
             close();
-            throw new IOException("Failed to initialize GCP Storage client", e);
+            throw new IOException("Unexpected error initializing GCP destination: " + e.getMessage(), e);
+        }
+    }
+
+    /** Validates basic accessibility of the destination bucket */
+    private void validateDestinationBucket() throws IOException {
+        logger.debug("Validating GCS destination bucket '{}' accessibility...", bucketName);
+        try {
+            storage.get(bucketName); // Check bucket exists and basic access
+            // Further check write permissions? Could do a small test write/delete, but adds complexity/cost.
+            logger.debug("GCS destination bucket '{}' is accessible.", bucketName);
+        } catch (StorageException e) {
+            throw new IOException("Failed to access GCS destination bucket: " + bucketName, e);
         }
     }
 
     @Override
     public OutputStream openOutputStream(ItemInfo item) throws IOException {
-        // Used for directory transfer mode. Destination path derived from ItemInfo.
+        // Used for directory transfer mode
         Objects.requireNonNull(item, "ItemInfo cannot be null");
         if (item.isDirectory()) {
             throw new IOException("Cannot open OutputStream for a directory item: " + item.getFullRelativePath());
         }
-
-        // Combine destination prefix with item's full relative path
         String fullObjectName = this.folderPrefix + item.getFullRelativePath();
         logger.debug("[OpenStream] Opening output stream for GCS object: gs://{}/{}", bucketName, fullObjectName);
-
-        return openGcsOutputStream(fullObjectName); // Use helper
+        return openGcsOutputStream(fullObjectName);
     }
 
-     @Override
+    @Override
     public OutputStream openSpecificOutputStream(String targetName) throws IOException, UnsupportedOperationException {
-         // Used for single file transfer mode. Destination path is prefix + targetName.
-         Objects.requireNonNull(targetName, "Target file name cannot be null");
-         if (targetName.isBlank()) {
-             throw new IllegalArgumentException("Invalid target file name for single file transfer (blank).");
-         }
-          // Basic check - maybe redundant if targetName is just filename from source
-         if (targetName.contains("/") || targetName.contains("\\")) {
-             logger.warn("Target file name '{}' contains path separators. Ensure this is intended relative to base prefix '{}'.", targetName, folderPrefix);
-         }
+        // Used for single file transfer mode
+        Objects.requireNonNull(targetName, "Target file name cannot be null");
+        if (targetName.isBlank()) {
+            throw new IllegalArgumentException("Invalid target file name for single file transfer (blank).");
+        }
+        if (targetName.contains("/") || targetName.contains("\\")) {
+            logger.warn("Target file name '{}' contains path separators. Ensure this is intended relative to base prefix '{}'.", targetName, folderPrefix);
+        }
 
-         // Combine destination prefix with the target filename
-         String fullObjectName = this.folderPrefix + targetName;
-         logger.debug("[OpenSpecificStream] Opening specific output stream for GCS object: gs://{}/{}", bucketName, fullObjectName);
-
-        return openGcsOutputStream(fullObjectName); // Use helper
+        String fullObjectName = this.folderPrefix + targetName;
+        logger.debug("[OpenSpecificStream] Opening specific output stream for GCS object: gs://{}/{}", bucketName, fullObjectName);
+        return openGcsOutputStream(fullObjectName);
     }
 
-     /** Helper method to open GCS output stream for a given object name */
-     private OutputStream openGcsOutputStream(String objectName) throws IOException {
-          try {
+    /** Helper method to open GCS output stream for a given object name */
+    private OutputStream openGcsOutputStream(String objectName) throws IOException {
+        try {
             BlobId blobId = BlobId.of(bucketName, objectName);
-            // Let GCS determine content type, or set explicitly if needed:
-            BlobInfo blobInfo = BlobInfo.newBuilder(blobId)
-                                       // .setContentType("application/your-type")
-                                        .build();
+            BlobInfo blobInfo = BlobInfo.newBuilder(blobId).build();
 
+            // Get the writer using resumable uploads
             WriteChannel writer = storage.writer(blobInfo, Storage.BlobWriteOption.disableGzipContent());
-            return Channels.newOutputStream(writer);
 
+            // *** Enhancement: Set chunk size using the static final variable ***
+            writer.setChunkSize(RESUMABLE_UPLOAD_CHUNK_SIZE_BYTES);
+            logger.debug("Setting GCS resumable upload chunk size to: {} bytes", RESUMABLE_UPLOAD_CHUNK_SIZE_BYTES);
+            // *** End Enhancement ***
+
+            return Channels.newOutputStream(writer);
         } catch (StorageException e) {
-            logger.error("Failed to open GCS object 'gs://{}/{}' for writing: {}",
-                         bucketName, objectName, e.getMessage(), e);
-             if (e.getCode() == 403) { // Forbidden
-                 throw new IOException("Permission denied opening GCS object for writing: gs://" + bucketName + "/" + objectName, e);
-            }
-            // Other errors (e.g., invalid bucket name, connection issues)
+            logger.error("Failed to open GCS object 'gs://{}/{}' for writing: {}", bucketName, objectName, e.getMessage(), e);
+            if (e.getCode() == 403) throw new IOException("Permission denied opening GCS object for writing: gs://" + bucketName + "/" + objectName, e);
             throw new IOException("Failed to open GCS object for writing: gs://" + bucketName + "/" + objectName, e);
         }
-     }
-
+    }
 
     @Override
     public void ensureDirectoryExists(ItemInfo item) throws IOException {
-        // Only called during directory transfer mode (TransferService Pass 1).
-        // GCS handles intermediate "directory" creation implicitly when objects are written.
-        // Explicit 0-byte objects ending in '/' are usually not required.
+        // (Logic remains the same - no-op for GCS)
         logger.trace("[EnsureDir] ensureDirectoryExists called for GCS item '{}'. No explicit action taken (implicit creation).", item.getFullRelativePath());
-        // If explicit markers WERE needed, logic would go here (similar to commented out section previously).
     }
 
 
     @Override
     public String getDescription() {
-        // Destination description doesn't depend on single file mode of source
+        // (Logic remains the same)
         String prefix = config.getNormalizedFolderPrefix();
         String target = "folder=" + (prefix.isEmpty() ? "(bucket root)" : prefix);
-        return String.format("GCP[bucket=%s, %s, key=***]", bucketName, target);
+        return String.format("GCP[bucket=%s, %s]", bucketName, target); // Removed key info
     }
 
     @Override
     public void close() throws IOException {
+        // (Logic remains the same)
         logger.debug("Closing GCP Data Destination for: {}", config.getDescription());
         try {
             if (storage != null) {
-                 logger.info("GCP Data Destination resources assumed closed/managed by library.");
+                logger.info("GCP Data Destination resources assumed closed/managed by library.");
             }
         } catch (Exception e) {
             logger.error("Error closing GCP Storage client resources (if any): {}", e.getMessage(), e);

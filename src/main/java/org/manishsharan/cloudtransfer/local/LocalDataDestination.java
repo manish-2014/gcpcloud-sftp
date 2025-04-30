@@ -1,7 +1,9 @@
 package org.manishsharan.cloudtransfer.local;
 
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+
 import org.manishsharan.cloudtransfer.config.LocalConfig;
 import org.manishsharan.cloudtransfer.core.DataDestination;
 import org.manishsharan.cloudtransfer.core.ItemInfo;
@@ -17,7 +19,7 @@ import java.util.Objects;
  */
 public class LocalDataDestination implements DataDestination {
 
-    private static final Logger logger = LogManager.getLogger(LocalDataDestination.class);
+    private static final Logger logger = LoggerFactory.getLogger(LocalDataDestination.class);
 
     private final LocalConfig config;
     private final Path basePath; // Destination is always treated as a base directory path

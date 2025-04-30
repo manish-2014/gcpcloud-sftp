@@ -1,7 +1,9 @@
 package org.manishsharan.cloudtransfer.local;
 
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+
 import org.manishsharan.cloudtransfer.config.LocalConfig;
 import org.manishsharan.cloudtransfer.core.DataSource;
 import org.manishsharan.cloudtransfer.core.ItemInfo;
@@ -19,7 +21,7 @@ import java.util.stream.Stream;
  */
 public class LocalDataSource implements DataSource {
 
-    private static final Logger logger = LogManager.getLogger(LocalDataSource.class);
+    private static final Logger logger = LoggerFactory.getLogger(LocalDataSource.class);
 
     private final LocalConfig config;
     private final Path effectivePath; // Stores either directory path or file path

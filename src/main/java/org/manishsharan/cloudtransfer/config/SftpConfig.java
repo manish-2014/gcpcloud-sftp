@@ -1,14 +1,15 @@
 package org.manishsharan.cloudtransfer.config;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
-import jakarta.validation.constraints.AssertTrue; // For validation
+import jakarta.validation.constraints.AssertTrue;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
-import jakarta.validation.constraints.NotBlank; // For required fields like server/user/key
+import jakarta.validation.constraints.NotBlank; // Keep for server/user
 
 /**
  * Configuration specific to SFTP locations.
  * Supports either a directory ('path') or a single file ('file_path').
+ * Credentials (like SSH keys) are handled externally.
  */
 public class SftpConfig extends LocationConfig {
 
@@ -21,10 +22,10 @@ public class SftpConfig extends LocationConfig {
     @Max(value = 65535, message = "SFTP port must be between 1 and 65535")
     private int sftpPort = 22; // Default SFTP port
 
-    @JsonProperty("ssh_key")
-    @NotBlank(message = "SFTP 'ssh_key' path must be provided (password auth not implemented)")
-    private String sshKeyPath;
-    // Consider adding sshKeyPassphrase if keys can be protected
+    // REMOVED: sshKeyPath - will be handled by SftpClientProvider
+    // @JsonProperty("ssh_key")
+    // @NotBlank(message = "SFTP 'ssh_key' path must be provided (password auth not implemented)")
+    // private String sshKeyPath;
 
     @JsonProperty("ssh_user")
     @NotBlank(message = "SFTP 'ssh_user' must be provided")
@@ -43,8 +44,7 @@ public class SftpConfig extends LocationConfig {
     public void setSftpServer(String sftpServer) { this.sftpServer = sftpServer; }
     public int getSftpPort() { return sftpPort; }
     public void setSftpPort(int sftpPort) { this.sftpPort = sftpPort; }
-    public String getSshKeyPath() { return sshKeyPath; }
-    public void setSshKeyPath(String sshKeyPath) { this.sshKeyPath = sshKeyPath; }
+    // REMOVED: getSshKeyPath() / setSshKeyPath()
     public String getSshUser() { return sshUser; }
     public void setSshUser(String sshUser) { this.sshUser = sshUser; }
     public String getPath() { return path; }
@@ -55,30 +55,23 @@ public class SftpConfig extends LocationConfig {
 
     /**
      * Validation rule: Ensures either 'path' OR 'file_path' is set, but not both.
-     * Uses Jakarta Bean Validation. isBlank() requires Java 11+.
-     * @return true if validation passes, false otherwise.
      */
     @AssertTrue(message = "Exactly one of 'path' (for directory) or 'file_path' (for single file) must be provided and non-blank for SFTP location")
     private boolean isPathOrFilePathValid() {
         boolean pathPresent = path != null && !path.isBlank();
         boolean filePathPresent = filePath != null && !filePath.isBlank();
-        // Use XOR (^) to ensure exactly one is true (present and not blank)
         return pathPresent ^ filePathPresent;
     }
 
     /**
      * Checks if this configuration represents a single file transfer.
-     * @return true if filePath is configured, false otherwise.
      */
     public boolean isSingleFile() {
-        // Assumes validation passed, so if filePath is present, path is not.
         return filePath != null && !filePath.isBlank();
     }
 
      /**
      * Gets the effective path (either directory path or single file path).
-     * Assumes validation has passed.
-     * @return The configured path string.
      */
      public String getEffectivePath() {
          return isSingleFile() ? filePath : path;
@@ -97,9 +90,10 @@ public class SftpConfig extends LocationConfig {
             type = "path";
          } else {
              targetPath = "[invalid config]";
-             type = "path"; // Default assumption
+             type = "path";
          }
-        return String.format("SFTP[user=%s, host=%s:%d, %s=%s, key=***]",
+        // REMOVED key info from description
+        return String.format("SFTP[user=%s, host=%s:%d, %s=%s]",
                              sshUser, sftpServer, sftpPort, type, targetPath);
     }
 
@@ -110,9 +104,9 @@ public class SftpConfig extends LocationConfig {
                "type='" + type + '\'' +
                ", sftpServer='" + sftpServer + '\'' +
                ", sftpPort=" + sftpPort +
-               ", sshKeyPath='********'" +
+               // REMOVED: sshKeyPath='********' +
                ", sshUser='" + sshUser + '\'' +
-               pathInfo + // Add path or file_path
+               pathInfo +
                '}';
     }
 }
