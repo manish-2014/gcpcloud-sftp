@@ -10,8 +10,8 @@ import net.schmizz.sshj.userauth.UserAuthException;
 import net.schmizz.sshj.userauth.keyprovider.KeyProvider;
 import net.schmizz.sshj.userauth.keyprovider.OpenSSHKeyFile;
 
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
+import org.slf4j.Logger; 
+import org.slf4j.LoggerFactory;
 
 import java.io.File;
 // --- ADDED IMPORT ---
@@ -30,7 +30,7 @@ import java.util.stream.Stream;
  */
 public class App {
 
-    private static final Logger logger = LogManager.getLogger(App.class);
+    private static final Logger logger = LoggerFactory.getLogger(App.class);
 
     public static void main(String[] args) {
         logger.info("SFTP Client Started.");

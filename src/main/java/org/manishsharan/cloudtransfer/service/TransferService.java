@@ -7,8 +7,10 @@ import org.manishsharan.cloudtransfer.config.GcpConfig;
 import org.manishsharan.cloudtransfer.core.DataDestination;
 import org.manishsharan.cloudtransfer.core.DataSource;
 import org.manishsharan.cloudtransfer.core.ItemInfo;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -21,7 +23,7 @@ import java.util.stream.Stream;
 
 public class TransferService {
 
-    private static final Logger logger = LogManager.getLogger(TransferService.class);
+    private static final Logger logger = LoggerFactory.getLogger(TransferService.class);
     private static final int BUFFER_SIZE = 8192;
 
     // Get source and destination configs for checking single file mode

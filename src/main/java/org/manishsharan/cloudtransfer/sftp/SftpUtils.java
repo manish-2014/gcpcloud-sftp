@@ -1,14 +1,15 @@
 package org.manishsharan.cloudtransfer.sftp;
 
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 
 /**
  * Utility methods for handling SFTP paths.
  */
 public class SftpUtils {
 
-    private static final Logger logger =  LogManager.getLogger(SftpUtils.class);
+    private static final Logger logger =  LoggerFactory.getLogger(SftpUtils.class);
 
     // Private constructor to prevent instantiation
     private SftpUtils() {}
